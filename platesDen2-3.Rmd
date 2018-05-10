@@ -1,0 +1,174 @@
+---
+title: "Full run"
+author: "KB"
+date: "March 26, 2018"
+output: 
+  html_document: 
+    keep_md: yes
+editor_options: 
+  chunk_output_type: inline
+---
+```{r setup, include=FALSE}
+library(svglite)
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  dev = "svglite",
+  fig.ext = ".svg"
+)
+```
+##Script for analysis of multiple FCS plates with data-driven preprocessing and gating
+#####**It requires a csv file with a list of directories containing FCS files**
+#####**It also use wellAnnotation table saved to csv in the same directory**
+#####*wellAnnotation specify Well.ID, Strain, Screening No, and control samples*
+
+```{r load}
+library(flowCore)
+library(flowViz)
+library(flowDensity)
+library(flowStats)
+library(plateCore)
+library(flowClust)
+```
+##pre-define more complicated functions used lated with `fsApply`
+```{r functions for clean, gate and SD with fsapply}
+#rm functions each time when optimizing
+# rm(multiClean)
+# rm(multiGate)
+
+rectangClean <- function(x){
+  higherbound <- deGate(x, channel = "SSC.A", use.percentile = TRUE, percentile = 0.90)
+  cellsH <- flowDensity(x, channels = c("FSC.A", "SSC.A"), position = c(NA, F), gates = c(NA,higherbound))
+  rectSub <- notSubFrame(cellsH, c("FSC.A","SSC.A"), position = c(F,NA), gates = c(25000,NA))
+  rectSubFS <- getflowFrame(rectSub)
+}
+
+multiGate <- function(x){
+  
+  
+  xgated <- flowDensity(x, channels = c("FSC.A", "B535.345.A"), position = c(NA, T),ellip.gate=FALSE, gates = c(NA,ctrgate))
+  #part for automatic ploting and saving as png. It iterates filenames and plotnames with Plot ID defined in `for` loop and Well ID directly from fsapply FUN
+  #setup save directory to existing folder with specified iterative name and extension. Specify name with paste function. 
+  GUID <- identifier(x)
+  plottitle = paste(pName,"Gated",GUID)
+  savepath=file.path("C:/Users/KozakPC/Documents","R/Cyto","Plots",plottitle)
+
+  #define file extension, plot with gate and close
+  png(filename = paste(savepath,".png"))
+  plotDens(getflowFrame(xgated), channels = c("B535.345.A", "FSC.A"), xlim = c(0, 25000), ylim= c(0,250000),xlab = "mVenus",ylab = "FSC-A", main = plottitle)
+  #lines(ctrgate@filter, type = "l")
+  dev.off()
+  
+  positives <- getflowFrame(xgated)
+}
+#Calculating Median Absolut Deviation and Standard Deviation requires transformation of flowFrame to matrix
+extractMAD <- function(x){
+  matrixCG <- exprs(x)
+  MAD <- mad(matrixCG[,"B535.345.A"])
+}
+extractSD <- function(x){
+  matrixCG <- exprs(x)
+  SD <- sd(matrixCG[,"B535.345.A"])
+ }
+```
+```{r}
+#rm(Totres.list)
+#rm(Total.results)
+#rm(Cclean.list)
+```
+
+##setup for mulitplate analysis
+```{r for loop with nested fsApply, message=FALSE}
+longLoP <- read.csv("C:/Users/KozakPC/Documents/R/Cyto/Corrected.csv", stringsAsFactors = FALSE)
+Totres.list <- list()
+Total.results <- data.frame()
+Cclean.list <- list()
+for (i in 1:nrow(longLoP)){
+  path <- longLoP[i,]
+  setwd(path)
+  ##Load path and files to flowSet
+  wellAnnotation <- read.csv("wellAnnotation.csv", header = TRUE, stringsAsFactors = FALSE)
+  pFS <- read.flowSet(path = path,pattern = ".fcs",name.keyword = "WELL ID",alter.names=TRUE)
+  
+  #use pName for iterative name in all saved pngs
+  pName <- paste("Plate",i)
+  
+  cleanedFS <- fsApply(pFS, rectangClean)
+  
+  
+  ##Pass cleaned flowSet for gating
+  ###test for existance of data and pick first encountered. There is always at least one well between A and D.
+  ctrwell <- ifelse(any(rownames(pData(pFS)) == "A12"),"A12",
+                  (ifelse(any(rownames(pData(pFS)) == "B12"),"B12",
+                          (ifelse(any(rownames(pData(pFS)) == "C12"),"C12","D12")))))
+  ctrWELL12 <- cleanedFS[[ctrwell]]
+  ctrgate <- deGate(ctrWELL12, channel = "B535.345.A", use.percentile = TRUE, percentile = 0.85)
+  
+  gatedFS <- fsApply(cleanedFS, multiGate)
+  
+  ##pass to plate set
+  pGatedFS <- flowPlate(gatedFS, wellAnnotation, plateName = pName)
+  
+  ##extract stats, combine to data.frame and save to a separate list
+  #Possible to calculate MFIs and MFI ration to controls, but gives error with negative or very low count, I guess [0:1]
+  #plateFSstats <- summaryStats(pGatedFS)
+  df.results <- pGatedFS@wellAnnotation
+  
+  #cell No
+  cellsClean <- fsApply(cleanedFS, nrow)
+  colnames(cellsClean) <- c("Total_CellNo")
+  df.cellsClean <- data.frame(cellsClean)
+  
+  #Used for QC
+  cleanNo.name <- paste("Total Cell No.", pName)
+  savepath.cleanNo = file.path("C:/Users/KozakPC/Documents","R/Cyto","Results",cleanNo.name)
+  svg(filename = paste(savepath.cleanNo, ".svg"), width = 6, height = 5)
+  par(mar=c(5,5,4,1)+0.1)
+  barplot(margin.table(cellsClean,1), ylim= c(0,10000), main= cleanNo.name, cex.main=1.5, xlab = "Wells", cex.lab=1.2, cex.names=0.25, las=2, col = "darkgreen")
+  title(ylab = "No. of cells", line = 3.4, cex.lab=1.2)
+  dev.off()
+  
+  cellsGated <- fsApply(gatedFS, nrow)
+  colnames(cellsGated) <- c("Positives_CellNo")
+  df.cellsGated <- data.frame(cellsGated)
+  
+  gatedNo.name <- paste("Gated Cell No.", pName)
+  savepath.gatedNo = file.path("C:/Users/KozakPC/Documents","R/Cyto","Results",gatedNo.name)
+  svg(filename = paste(savepath.gatedNo, ".svg"), width = 6, height = 5)
+  par(mar=c(5,5,4,1)+0.1)
+  barplot(margin.table(cellsGated,1), ylim= c(0,10000), main= gatedNo.name, cex.main=1.5, xlab = "Wells", las=2, cex.lab=1.2, cex.names=0.25, col = "darkgoldenrod2")
+  title(ylab = "No. of cells", line = 3.4, cex.lab=1.2)
+  abline(h=cellsGated[identifier(ctrWELL12),], col = "black", lty = 1, lwd = 1)
+  dev.off()
+  
+  #MAD
+  MAData <- fsApply(gatedFS, extractMAD)
+  colnames(MAData) <- "MAD"
+  df.MAD <- data.frame(MAData)
+  df.MAD
+  
+  #SD
+  SData <- fsApply(gatedFS, extractSD)
+  colnames(SData) <- "SD"
+  df.SD <- data.frame(SData)
+  
+  #summary
+  sumwells <- fsApply(gatedFS, function(x){sum_s <- summary(x)[,8]})
+  df.sw <- data.frame(sumwells)
+  
+  df.resultsm <- merge(x=df.results, y=df.cellsClean, by.x="Well.Id", by.y = 0, all.x=TRUE)
+  df.resultsn <- merge(x=df.resultsm, y=df.cellsGated, by.x="Well.Id", by.y = 0, all.x=TRUE)
+  df.resultso <- merge(x=df.resultsn, y=df.sw, by.x="Well.Id", by.y = 0, all.x=TRUE)
+  df.resultsp <- merge(x=df.resultso, y=df.MAD, by.x="Well.Id", by.y = 0, all.x=TRUE)
+  mdf.results <- merge(x=df.resultsp, y=df.SD, by.x="Well.Id", by.y = 0, all.x=TRUE)
+  mdf.results$i <- i
+  Totres.list[[i]] <- mdf.results
+}
+#make a full data.frame from list of results
+Total.results = do.call(rbind,Totres.list)
+head(Total.results)
+tail(Total.results)
+#remove "name" column as its redundant and class=list which prevents export to csv
+Total.results$name <- NULL
+write.csv(Total.results, file = "C:/Users/KozakPC/Documents/R/Cyto/Results/ResultsTable_correct.csv")
+```
+
