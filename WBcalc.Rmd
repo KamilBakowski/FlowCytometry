@@ -1,0 +1,140 @@
+---
+title: "WBcalc"
+author: "KB"
+date: "May 3, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+##Quick analysis of quantitative WB of IRES
+```{r load libraries}
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(data.table)
+library(RColorBrewer)
+library(ggpubr)
+library(ggsignif)
+library(scales)
+```
+####load data and clean
+```{r load,clean}
+WB.df <- read.table("pKB-WB_ProtConc.txt", header = T)
+str(WB.df)
+levels(WB.df$Construct)
+View(WB.df)
+WB.df$per.TSP <- (WB.df$ng/5000)*100
+WB.stats <- WB.df %>%
+  group_by(Strain, Construct) %>%
+  summarize(ng.mean = mean(ng), ng.sd = sd(ng), per.mean = mean(per.TSP), sd.per = sd(per.TSP))
+str(WB.stats)
+View(WB.df)
+WB.se <- ddply(WB.df, c("Construct"), summarise,
+               N = length(ng),
+               mean = mean(ng),
+               sd = sd(ng),
+               sem = sd/sqrt(N),
+               per.mean = mean(per.TSP),
+               per.sd = sd(per.TSP),
+               per.sem = per.sd/sqrt(N))
+
+WB.se
+
+BafWT <- read.table("Baf-WT236.txt", header = T)
+BafWT$per.TSP <- (BafWT$ng/5000)*100
+BafWT.se <- ddply(BafWT, c("Construct"), summarise,
+               N = length(ng),
+               mean = mean(ng),
+               sd = sd(ng),
+               sem = sd/sqrt(N),
+               per.mean = mean(per.TSP),
+               per.sd = sd(per.TSP),
+               per.sem = per.sd/sqrt(N))
+
+BafWT.se
+```
+####Plot and calculate siginificance
+```{r plot,stats}
+mycolors <- c("pOptV" = "#663300","pKB2.34" = "#248f8f","pKB2.36" = "#0040ff","pKB2.52" = "#00e600","pKB2.53" = "#009900","pKB2.54" = "#336600","pKB2.40" = "#ccff33")
+
+bar.WBng <- ggplot(WB.se, aes(x=Construct, y=mean, fill = Construct))
+bar.WBng + geom_bar(stat = "identity", color = "gray20", position = position_dodge())+
+  labs(title = "Quantitative WB UVM", y = "ng of mVenus", x = "")+
+  theme(
+        axis.text.x = element_text(angle = 0, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "grey",size = 0.6, linetype = 3)
+    )+
+  scale_fill_manual(values = mycolors, name = "Constructs")+
+  geom_errorbar(position=position_dodge(.9), width=.25, aes(ymin=mean-sem, ymax=mean+sem))
+
+View(WB.se)
+
+bar.WBper <- ggplot(WB.se, aes(x=Construct, y=per.mean, fill = Construct))
+bar.WBper + geom_bar(stat = "identity", color = "gray20", position = position_dodge())+
+  labs(title = "", y = "% of TSP", x = "")+
+  theme(
+        axis.text.x = element_text(angle = 0, vjust = 0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=14),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "grey",size = 0.6, linetype = 3),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14)
+    )+
+  scale_y_continuous(breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6))+
+  scale_fill_manual(values = mycolors, name = "Constructs")+
+  geom_errorbar(position=position_dodge(.9), width=.25, aes(ymin=per.mean-per.sd, ymax=per.mean+per.sd))
+
+WBdf.anova <- aov(ng~Construct, data = WB.df)
+summary(WBdf.anova)
+TukeyHSD(WBdf.anova)
+
+bar.BafWT <- ggplot(BafWT.se, aes(x=Construct, y=mean, fill = Construct))
+bar.BafWT + geom_bar(stat = "identity", color = "gray20", position = position_dodge())+
+  labs(title = "Quantitative WB", y = "ng of mVenus", x = "")+
+  theme(
+        axis.text.x = element_text(angle = 0, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "grey",size = 0.6, linetype = 3)
+    )+
+  scale_fill_manual(labels = c("BafJ","WT","Low"),values = c("firebrick1","forestgreen"), name = "Strains")+
+  geom_errorbar(position=position_dodge(.9), width=.25, aes(ymin=mean-sem, ymax=mean+sem))
+
+bar.BafWTper <- ggplot(BafWT.se, aes(x=Construct, y=per.mean, fill = Construct))
+bar.BafWTper + geom_bar(stat = "identity", color = "gray20", position = position_dodge())+
+  labs(title = "Quantitative WB", y = "% of TSP", x = "")+
+  theme(
+        axis.text.x = element_text(angle = 0, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "grey",size = 0.6, linetype = 3)
+    )+
+  scale_fill_manual(labels = c("BafJ","WT","Low"),values = c("firebrick1","forestgreen"), name = "Strains")+
+  geom_errorbar(position=position_dodge(.9), width=.25, aes(ymin=per.mean-per.sem, ymax=per.mean+per.sem))
+
+```
+
+
+
