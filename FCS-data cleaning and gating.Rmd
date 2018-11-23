@@ -1,7 +1,6 @@
 ---
 title: "Full run"
-author: "KB"
-date: "March 26, 2018"
+author: "Kamil Bakowski"
 output: 
   html_document: 
     keep_md: yes
@@ -16,10 +15,10 @@ knitr::opts_chunk$set(
   fig.ext = ".svg"
 )
 ```
-##Script for analysis of multiple FCS plates with data-driven preprocessing and gating
-#####**It requires a csv file with a list of directories containing FCS files**
-#####**It also use wellAnnotation table saved to csv in the same directory**
-#####*wellAnnotation specify Well.ID, Strain, Screening No, and control samples*
+## Script for analysis of multiple FCS plates with data-driven preprocessing and gating
+##### **It requires a csv file with a list of directories containing FCS files**
+##### **It also use wellAnnotation table saved to csv in the same directory**
+##### *wellAnnotation specify Well.ID, Strain, Screening No, and control samples*
 
 ```{r load}
 library(flowCore)
@@ -29,7 +28,7 @@ library(flowStats)
 library(plateCore)
 library(flowClust)
 ```
-##pre-define more complicated functions used lated with `fsApply`
+## pre-define more complicated functions used lated with `fsApply`
 ```{r functions for clean, gate and SD with fsapply}
 #rm functions each time when optimizing
 # rm(multiClean)
@@ -76,7 +75,7 @@ extractSD <- function(x){
 #rm(Cclean.list)
 ```
 
-##setup for mulitplate analysis
+## setup for mulitplate analysis
 ```{r for loop with nested fsApply, message=FALSE}
 longLoP <- read.csv("C:/Users/KozakPC/Documents/R/Cyto/Corrected.csv", stringsAsFactors = FALSE)
 Totres.list <- list()
