@@ -1,0 +1,1270 @@
+---
+title: "FlowCytometry data statistical analysis"
+author: "Kamil Bakowski"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+## Statistical analysis of the data after preprocessing with the flow cytometry pipeline 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+##### Default option to check the packages and install all necesary with dependencies
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, ggpubr, data.table, RColorBrewer, ggsignif, ca, factoextra, car, conover.test, rprojroot)
+```
+##### Load necessary libraries
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(ggpubr)
+library(data.table)
+library(RColorBrewer)
+library(ggsignif) # t.test with ggplot
+library(ca) # correspondence analysis
+library(factoextra) # PCA and visualization 
+library(conover.test)
+library(rprojroot) # setting the directory relative to the root
+library(car)
+
+```
+## **Data cleaning**
+
+1.Load data from csv  
+2.Change names to more R friendly  
+3.Remove unused columns  
+4.Change negative values to 0 for safe calculations  
+5.Remove low quality samples which have less than 5000 events recorded
+6.Split by strain and type of bicistronic system 
+
+```{r load, clean, split data}
+rootdir <- is_rstudio_project$make_fix_file()
+
+flowdata <- read.csv("./ResultsTable_correct.csv")
+
+flowdata$Ab.Name[which(flowdata$Ab.Name=="2_233")]<-"2_23"
+flowdata$Ab.Name[which(flowdata$Ab.Name=="2_244")]<-"2_24"
+flowdata$Ab.Name=gsub("_",".", flowdata$Ab.Name,fixed = TRUE)
+# View(flowdata)
+
+#remove unused columns
+sh.FD <- subset(flowdata, select = -c(X,Sample.Type,Channel))
+#remove negatives
+sh.FD[sh.FD<0] <- 0
+noneg.FD <- subset(sh.FD, Total_CellNo > 5000)
+# View(noneg.FD)
+# View(sh.FD)
+
+# calculate percent of positives
+noneg.FD$PercentPositives <- with(noneg.FD, Positives_CellNo/Total_CellNo*100)
+# View(noneg.FD)
+
+#divide by strains
+UVM.FD <- subset(noneg.FD, Strain == "UVM")
+# nrow(UVM.FD)
+Baf.FD <- subset(noneg.FD, Strain == "BafJ")
+# nrow(Baf.FD)
+WT.FD <- subset(noneg.FD, Strain == "WT")
+# nrow(WT.FD)
+
+#divide data sets to 2A and IRES, sharing Ctr and pOptV
+#for multiple selection subsetting use `is.element` or `filter %in%`
+UVM.2A <- UVM.FD[is.element(UVM.FD$Ab.Name, c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","pOptV","Ctr")),]
+Baf.2A <- Baf.FD[is.element(Baf.FD$Ab.Name, c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","pOptV","Ctr")),]
+WT.2A <- WT.FD[is.element(WT.FD$Ab.Name, c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","pOptV","Ctr")),]
+
+UVM.IRES <- UVM.FD[is.element(UVM.FD$Ab.Name, c("2.33","2.34","2.35","2.36","2.52","2.53","2.54","pOptV","Ctr")),]
+Baf.IRES <- Baf.FD[is.element(Baf.FD$Ab.Name, c("2.33","2.34","2.35","2.36","2.52","2.53","2.54","pOptV","Ctr")),]
+WT.IRES <- WT.FD[is.element(WT.FD$Ab.Name, c("2.33","2.34","2.35","2.36","2.52","2.53","2.54","pOptV","Ctr")),]
+
+UVM.IRES2 <- UVM.FD[is.element(UVM.FD$Ab.Name, c("2.34","2.36","2.52","2.53","2.54","pOptV","Ctr")),]
+Baf.IRES2 <- Baf.FD[is.element(Baf.FD$Ab.Name, c("2.34","2.36","2.52","2.53","2.54","pOptV","Ctr")),]
+WT.IRES2 <- WT.FD[is.element(WT.FD$Ab.Name, c("2.34","2.36","2.52","2.53","2.54","pOptV","Ctr")),]
+
+#create Ctr subsets for threshold calculations
+UVM.ctr <- subset(UVM.FD, Ab.Name == "Ctr")
+Baf.ctr <- subset(Baf.FD, Ab.Name == "Ctr")
+WT.ctr <- subset(WT.FD, Ab.Name == "Ctr")
+nrow(UVM.ctr)
+nrow(Baf.ctr)
+nrow(WT.ctr)
+```
+### Calculate and apply threshold to each strain individually.  
+
+calculate **MADs**, set thresholds and filter data sets with `X*MAD.percent` which gives **~90%** removal of false positives
+
+threshold for false positives as multiplication of % of Ctrl **Median Absolut Deviation**
+
+#### Calculate thresholds for *UVM4*
+```{r thresholding}
+UVM.ctr$PercentPositives <- as.numeric(UVM.ctr$PercentPositives)
+UVM.MADPer.ctr <- mad(UVM.ctr$PercentPositives)
+UVM.MADMedian.ctr <- mad(UVM.ctr$Median)
+UVM.MADcellNo.ctr <- mad(UVM.ctr$Positives_CellNo)
+UVM.Per.threshold <- 3.5*UVM.MADPer.ctr  #threshold for false positives as multiplication of % of Ctr Median Absolut Deviation
+UVM.Med.threshold <- 2*UVM.MADMedian.ctr
+
+UVM.pos <- subset(UVM.FD, PercentPositives > UVM.Per.threshold)
+```
+#### Calculate thresholds for *BafJ5*
+```{r echo = TRUE, warning = FALSE, message = FALSE}
+Baf.ctr$PercentPositives <- as.numeric(Baf.ctr$PercentPositives)
+# ggqqplot(Baf.ctr$PercentPositives)
+# ggdensity(Baf.ctr$PercentPositives)
+Baf.MADPer.ctr <- mad(Baf.ctr$PercentPositives)
+Baf.MADMedian.ctr <- mad(Baf.ctr$Median)
+Baf.MADcellNo.ctr <- mad(Baf.ctr$Positives_CellNo)
+Baf.Per.threshold <- 5.5*Baf.MADPer.ctr #required higher MAD multiplication to remove ~90% of false positives
+Baf.Med.threshold <- 2*Baf.MADMedian.ctr
+# Baf.Per.threshold
+# Baf.Med.threshold
+Baf.pos <- subset(Baf.FD, PercentPositives > Baf.Per.threshold)
+# nrow(Baf.pos)
+```
+#### Calculate thresholds for *WT*
+```{r echo = TRUE, warning = FALSE, message = FALSE}
+WT.ctr$PercentPositives <- as.numeric(WT.ctr$PercentPositives)
+# ggqqplot(WT.ctr$PercentPositives)
+# ggdensity(WT.ctr$PercentPositives)
+WT.MADPer.ctr <- mad(WT.ctr$PercentPositives)
+WT.MADMedian.ctr <- mad(WT.ctr$Median)
+WT.MADcellNo.ctr <- mad(WT.ctr$Positives_CellNo)
+WT.Per.threshold <- 3.5*WT.MADPer.ctr
+WT.Med.threshold <- 2*WT.MADMedian.ctr
+# WT.Per.threshold
+# WT.Med.threshold
+WT.pos <- subset(WT.FD, PercentPositives > WT.Per.threshold)
+# nrow(WT.pos)
+```
+#### Select positive population after application of the threshold and removal of Ctrl samples
+```{r echo = TRUE, warning = FALSE, message = FALSE}
+#remaining Ctr samples are marked as outliers i.e. > X*Median Absolute Deviation
+UVM.posN <- UVM.pos[!is.element(UVM.pos$Ab.Name, "Ctr"),]
+Baf.posN <- Baf.pos[!is.element(Baf.pos$Ab.Name, "Ctr"),]
+WT.posN <- WT.pos[!is.element(WT.pos$Ab.Name, "Ctr"),]
+
+UVM.posF <- UVM.pos[!is.element(UVM.pos$Ab.Name, c("2.39","2.40","Ctr")),]
+Baf.posF <- Baf.pos[!is.element(Baf.pos$Ab.Name, c("2.39","2.40","Ctr")),]
+WT.posF <- WT.pos[!is.element(WT.pos$Ab.Name, c("2.39","2.40","Ctr")),]
+
+UVM.posR <- UVM.pos[!is.element(UVM.pos$Ab.Name, c("2.33","2.35","2.39","2.40","Ctr")),]
+UVM.posR$Ab.Name = as.factor(UVM.posR$Ab.Name)
+
+UVM.posF$Ab.Name = as.factor(UVM.posF$Ab.Name)
+Baf.posF$Ab.Name = as.factor(Baf.posF$Ab.Name)
+WT.posF$Ab.Name = as.factor(WT.posF$Ab.Name)
+
+# View(UVM.posN)
+# View(Baf.posN)
+# View(WT.posN)
+##Test normality of the sample distribution
+# ggqqplot(UVM.posN$Median)
+# ggdensity(UVM.posN$Median)
+```
+#### Separate positive populations by type of bicistronic constructs i.e. 2A- or IRES-based
+```{r echo = TRUE, warning = FALSE, message = FALSE}
+
+UVM.pos2A <- UVM.posF[is.element(UVM.posF$Ab.Name, c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","pOptV")),]
+Baf.pos2A <- Baf.posF[is.element(Baf.posF$Ab.Name, c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","pOptV")),]
+WT.pos2A <- WT.posF[is.element(WT.posF$Ab.Name, c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","pOptV")),]
+
+UVM.posIRES <- UVM.posF[is.element(UVM.posF$Ab.Name, c("2.33","2.34","2.35","2.36","2.52","2.53","2.54","pOptV")),]
+Baf.posIRES <- Baf.posF[is.element(Baf.posF$Ab.Name, c("2.33","2.34","2.35","2.36","2.52","2.53","2.54","pOptV")),]
+WT.posIRES <- WT.posF[is.element(WT.posF$Ab.Name, c("2.33","2.34","2.35","2.36","2.52","2.53","2.54","pOptV")),]
+
+UVM.posF <- UVM.pos[!is.element(UVM.pos$Ab.Name, c("2.39","2.40","Ctr")),]
+# UVM.posF$Ab.Name
+UVM.MAD.High <- mad(UVM.posF$Median)
+# UVM.MAD.High
+UVM.SD.High <- sd(UVM.posF$Median)
+# 2*UVM.SD.High
+UVM.median.V <- median(UVM.posF$Median)
+# 5*UVM.median.V
+```
+#### Set up a unified color system for all constructs
+```{r}
+mycolors <- c("2.2" = "#ff80ff","2.18" = "#ff00ff","2.19" = "#993399","2.22" = "#ff7733","2.23" = "#ff3300","2.24" = "#ff0000","2.30" = "#30e59d","2.31" = "#0dffde","2.32" = "#b30000","pOptV" = "#663300","2.33" = "#99e6e6","2.34" = "#248f8f","2.35" = "#0099ff","2.36" = "#0040ff","2.52" = "#00e600","2.53" = "#009900","2.54" = "#336600","2.40" = "#ccff33", "Ctr" = "grey50", "2.39" = "#ffffcc", "2.48" = "#ffcccc", "2.49" = "#ccccff")
+```
+#### Set the order of the constructs
+```{r set the order}
+UVM.FD$Ab.Name <- factor(UVM.FD$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.30","2.31", "2.32","2.33","2.34","2.35","2.36","2.39","2.40","2.48","2.49","2.52","2.53","2.54","pOptV","Ctr"))
+Baf.FD$Ab.Name <- factor(Baf.FD$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.30","2.31", "2.32","2.33","2.34","2.35","2.36","2.39","2.40","2.48","2.49","2.52","2.53","2.54","pOptV","Ctr"))
+WT.FD$Ab.Name <- factor(WT.FD$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.30","2.31", "2.32","2.33","2.34","2.35","2.36","2.39","2.40","2.48","2.49","2.52","2.53","2.54","pOptV","Ctr"))
+
+UVM.2A$Ab.Name <- factor(UVM.2A$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.30","2.31", "2.32","pOptV","Ctr"))
+Baf.2A$Ab.Name <- factor(Baf.2A$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.30","2.31", "2.32","pOptV","Ctr"))
+WT.2A$Ab.Name <- factor(WT.2A$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.30","2.31", "2.32","pOptV","Ctr"))
+
+UVM.IRES$Ab.Name <- factor(UVM.IRES$Ab.Name, c("2.33","2.34","2.35","2.36","2.39","2.40","2.48","2.49","2.52","2.53","2.54","pOptV","Ctr"))
+Baf.IRES$Ab.Name <- factor(Baf.IRES$Ab.Name, c("2.33","2.34","2.35","2.36","2.39","2.40","2.48","2.49","2.52","2.53","2.54","pOptV","Ctr"))
+WT.IRES$Ab.Name <- factor(WT.IRES$Ab.Name, c("2.33","2.34","2.35","2.36","2.39","2.40","2.48","2.49","2.52","2.53","2.54","pOptV","Ctr"))
+# levels(UVM.posF$Ab.Name)
+UVM.posF$Ab.Name <- factor(UVM.posF$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.32","2.33","2.34","2.35","2.36","2.52","2.53","2.54","pOptV"))
+# levels(Baf.posF$Ab.Name)
+Baf.posF$Ab.Name <- factor(Baf.posF$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.32","2.33","2.34","2.35","2.36","pOptV"))
+# str(WT.posF$Ab.Name)
+WT.posF$Ab.Name <- factor(WT.posF$Ab.Name, c("2.18", "2.19", "2.22","2.24","2.30","2.31", "2.32","2.33","2.34","2.35","2.36","pOptV"))
+# str(UVM.pos2A)
+UVM.pos2A$Ab.Name <- factor(UVM.pos2A$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.30","2.31", "2.32","pOptV"))
+Baf.pos2A$Ab.Name <- factor(Baf.pos2A$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.30","2.31", "2.32","pOptV"))
+WT.pos2A$Ab.Name <- factor(WT.pos2A$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.30","2.31", "2.32","pOptV"))
+
+UVM.posIRES$Ab.Name <- factor(UVM.posIRES$Ab.Name, c("2.33","2.34","2.35","2.36","2.40","2.52","2.53","2.54","pOptV"))
+Baf.posIRES$Ab.Name <- factor(Baf.posIRES$Ab.Name, c("2.33","2.34","2.35","2.36","2.40","2.52","2.53","2.54","pOptV"))
+WT.posIRES$Ab.Name <- factor(WT.posIRES$Ab.Name, c("2.33","2.34","2.35","2.36","2.40","2.52","2.53","2.54","pOptV"))
+
+UVM.posR$Ab.Name <- factor(UVM.posR$Ab.Name, c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.32","2.52","2.53","2.36","2.54","2.34","pOptV"))
+
+```
+
+## **Analysis and statistics**
+
+### Calculate remaining Ctrl samples after threshold application
+Calculate thresholding efficiency i.e. what fraction of false positives were succesfuly removed with the calculated thresholds
+
+#### Calculate remaining Ctrl fractions after threshold application for *UVM4*
+```{r}
+#calculate thresholding efficiency i.e. if what fraction of false positives were removed
+UVM.threshCtr <- plyr::count(UVM.pos$Ab.Name == "Ctr")
+UVM.threshCtr <- t(UVM.threshCtr)
+UVM.threshCtr <- data.frame(UVM.threshCtr)
+UVM.threshCtr <- UVM.threshCtr[-1,]
+colnames(UVM.threshCtr) <-c("Not.Ctr","Ctr.Left")
+UVM.threshCtr$Ctr.Total <- nrow(UVM.ctr)
+UVM.threshCtr$PercentLeft <- with(UVM.threshCtr, Ctr.Left/Ctr.Total*100)
+UVM.threshCtr$Discarded <- with(UVM.threshCtr, 100-PercentLeft)
+rownames(UVM.threshCtr) <- "UVM.Ctr"
+# UVM.threshCtr
+```
+#### Calculate remaining Ctrl fractions after threshold application for *BafJ5*
+```{r}
+Baf.threshCtr <- plyr::count(Baf.pos$Ab.Name == "Ctr")
+Baf.threshCtr <- t(Baf.threshCtr)
+Baf.threshCtr <- data.frame(Baf.threshCtr)
+Baf.threshCtr=Baf.threshCtr[-1,]
+colnames(Baf.threshCtr) <-c("Not.Ctr","Ctr.Left")
+Baf.threshCtr$Ctr.Total <- nrow(Baf.ctr)
+Baf.threshCtr$PercentLeft <- with(Baf.threshCtr, Ctr.Left/Ctr.Total*100)
+Baf.threshCtr$Discarded <- with(Baf.threshCtr, 100-PercentLeft)
+rownames(Baf.threshCtr) <- "Baf.Ctr"
+# Baf.threshCtr
+```
+#### Calculate remaining Ctrl fractions after threshold application for *WT*
+```{r}
+WT.threshCtr <- plyr::count(WT.pos$Ab.Name == "Ctr")
+WT.threshCtr <- t(WT.threshCtr)
+WT.threshCtr <- data.frame(WT.threshCtr)
+WT.threshCtr=WT.threshCtr[-1,]
+colnames(WT.threshCtr) <-c("Not.Ctr","Ctr.Left")
+WT.threshCtr$Ctr.Total <- nrow(WT.ctr)
+WT.threshCtr$PercentLeft <- with(WT.threshCtr, Ctr.Left/Ctr.Total*100)
+WT.threshCtr$Discarded <- with(WT.threshCtr, 100-PercentLeft)
+rownames(WT.threshCtr) <- "WT.Ctr"
+# WT.threshCtr
+```
+#### Calculate remaining Ctrl fractions after threshold application for *Ctrl*
+```{r}
+Ctr.summary <- rbind(UVM.threshCtr,Baf.threshCtr)
+Ctr.summary <- rbind(Ctr.summary,WT.threshCtr)
+# Ctr.summary
+```
+#### Calculate aggregated number of positives to total screened, not considering transformation variability
+
+```{r counting total percentage of positives}
+
+UVM.screened <- plyr::count(UVM.FD$Ab.Name)
+# UVM.screened
+colnames(UVM.screened) <- c("Constructs","Screened")
+Baf.screened <- plyr::count(Baf.FD$Ab.Name)
+# Baf.screened
+colnames(Baf.screened) <- c("Constructs","Screened")
+WT.screened <- plyr::count(WT.FD$Ab.Name)
+# WT.screened
+colnames(WT.screened) <- c("Constructs","Screened")
+UVM.trupos <- plyr::count(UVM.pos$Ab.Name)
+# UVM.trupos
+colnames(UVM.trupos) <- c("Constructs","True.Positives")
+Baf.trupos <- plyr::count(Baf.pos$Ab.Name)
+# Baf.trupos
+colnames(Baf.trupos) <- c("Constructs","True.Positives")
+WT.trupos <- plyr::count(WT.pos$Ab.Name)
+# WT.trupos
+colnames(WT.trupos) <- c("Constructs","True.Positives")
+
+UVM.freq <- merge(x=UVM.screened, y=UVM.trupos, by = "Constructs", all.x = TRUE)
+# UVM.freq
+Baf.freq <- merge(Baf.screened, Baf.trupos, by="Constructs", all.x = TRUE)
+# Baf.freq
+WT.freq <- merge(WT.screened, WT.trupos, by="Constructs", all.x = TRUE)
+# WT.freq
+
+UVM.freq$PercentColonies <- with(UVM.freq, True.Positives / Screened*100)
+# UVM.freq
+Baf.freq$PercentColonies <- with(Baf.freq, True.Positives / Screened*100)
+# Baf.freq
+WT.freq$PercentColonies <- with(WT.freq, True.Positives / Screened*100)
+# WT.freq
+
+```
+### Calculate transformation efficiency i.e. No. of positives per transformation (var.=Plate)
+Calculate statistics of trans. eff.
+#### Trans.eff. for all constructs, UVM
+```{r stats per plate}
+#calculate frequecies for each transformation grouped by constructs
+UVM.Tscr <- UVM.FD %>%
+  group_by(Ab.Name,Plate) %>%
+  tally()
+UVM.Tscr=as.data.frame(UVM.Tscr)
+UVM.Teff <- UVM.pos %>%
+  group_by(Ab.Name,Plate) %>%
+  tally()
+UVM.Teff=as.data.frame(UVM.Teff)
+colnames(UVM.Teff)[3] <- "p"
+
+#merge left-sided i.e. to total screened to include transformations without positives, NA changed to 0
+UVM.TfreqI <- merge(UVM.Tscr,UVM.Teff, by=c("Ab.Name","Plate"), all = TRUE)
+UVM.TfreqI["p"][is.na(UVM.TfreqI["p"])] <- 0
+# View(UVM.TfreqI)
+
+#calculate statistics
+UVM.TfreqI$Trans.eff <- with(UVM.TfreqI, p/n*100)
+UVM.TfreqI.Stat <- aggregate(Trans.eff ~ Ab.Name, UVM.TfreqI, FUN = function(x) mutate=c(mean = mean(x), sd = sd(x), median = median(x), mad = mad(x), N = length(x)), simplify = TRUE)
+UVM.TfreqI.Stat<- do.call(data.frame, UVM.TfreqI.Stat)
+
+#Select constructs with >=3 transformations
+UVM.TfreqTs <- UVM.TfreqI %>%
+  group_by(Ab.Name) %>%
+  count()
+UVM.TfreqL3 <- subset(UVM.TfreqTs, nn >= 3)
+UVM.Tfreq3 <- UVM.TfreqI[UVM.TfreqI$Ab.Name %in% UVM.TfreqL3$Ab.Name,]
+# View(UVM.Tfreq3)
+
+UVM.Tfreq3N <- UVM.Tfreq3[!is.element(UVM.Tfreq3$Ab.Name, "Ctr"),]
+# View(UVM.Tfreq3N)
+
+UVM.TfreqI.Stat3 <- UVM.TfreqI.Stat[UVM.TfreqI.Stat$Ab.Name %in% UVM.TfreqL3$Ab.Name,]
+# View(UVM.TfreqI.Stat3)
+
+```
+#### Trans.eff. for all constructs, Baf
+```{r Baf}
+Baf.Tscr <- Baf.FD %>%
+  group_by(Ab.Name,Plate) %>%
+  tally()
+Baf.Tscr=as.data.frame(Baf.Tscr)
+Baf.Teff <- Baf.pos %>%
+  group_by(Ab.Name,Plate) %>%
+  tally()
+Baf.Teff=as.data.frame(Baf.Teff)
+colnames(Baf.Teff)[3] <- "p"
+
+Baf.TfreqI <- merge(Baf.Tscr,Baf.Teff, by=c("Ab.Name","Plate"), all = TRUE)
+Baf.TfreqI["p"][is.na(Baf.TfreqI["p"])] <- 0
+Baf.TfreqI$Trans.eff <- with(Baf.TfreqI, p/n*100)
+Baf.TfreqI.Stat <- aggregate(Trans.eff ~ Ab.Name, Baf.TfreqI, FUN = function(x) c(mean = mean(x), sd = sd(x), median = median(x), mad = mad(x), N = length(x)))
+Baf.TfreqI.Stat<- do.call(data.frame, Baf.TfreqI.Stat)
+# View(Baf.TfreqI.Stat)
+
+Baf.TfreqTs <- Baf.TfreqI %>%
+  group_by(Ab.Name) %>%
+  count()
+Baf.TfreqL3 <- subset(Baf.TfreqTs, nn >= 3)
+Baf.Tfreq3 <- Baf.TfreqI[Baf.TfreqI$Ab.Name %in% Baf.TfreqL3$Ab.Name,]
+# View(Baf.Tfreq3)
+
+Baf.TfreqI.Stat3 <- Baf.TfreqI.Stat[Baf.TfreqI.Stat$Ab.Name %in% Baf.TfreqL3$Ab.Name,]
+# View(Baf.TfreqI.Stat3)
+
+Baf.Tfreq3N <- Baf.Tfreq3[!is.element(Baf.Tfreq3$Ab.Name, "Ctr"),]
+# View(Baf.Tfreq3N)
+
+```
+#### Trans.eff. for all constructs, WT
+```{r WT}
+WT.Tscr <- WT.FD %>%
+  group_by(Ab.Name,Plate) %>%
+  tally()
+WT.Tscr=as.data.frame(WT.Tscr)
+WT.Teff <- WT.pos %>%
+  group_by(Ab.Name,Plate) %>%
+  tally()
+WT.Teff=as.data.frame(WT.Teff)
+colnames(WT.Teff)[3] <- "p"
+
+WT.TfreqI <- merge(WT.Tscr,WT.Teff, by=c("Ab.Name","Plate"), all = TRUE)
+WT.TfreqI["p"][is.na(WT.TfreqI["p"])] <- 0
+WT.TfreqI$Trans.eff <- with(WT.TfreqI, p/n*100)
+WT.TfreqI.Stat <- aggregate(Trans.eff ~ Ab.Name, WT.TfreqI, FUN = function(x) c(mean = mean(x), sd = sd(x), median = median(x), mad = mad(x), N = length(x)))
+WT.TfreqI.Stat<- do.call(data.frame, WT.TfreqI.Stat)
+# WT.TfreqI.Stat
+
+WT.TfreqTs <- WT.TfreqI %>%
+  group_by(Ab.Name) %>%
+  count()
+WT.TfreqL3 <- subset(WT.TfreqTs, nn >= 3)
+WT.Tfreq3 <- WT.TfreqI[WT.TfreqI$Ab.Name %in% WT.TfreqL3$Ab.Name,]
+# WT.Tfreq3
+
+WT.TfreqI.Stat3 <- WT.TfreqI.Stat[WT.TfreqI.Stat$Ab.Name %in% WT.TfreqL3$Ab.Name,]
+# WT.TfreqI.Stat3
+
+WT.Tfreq3N <- WT.Tfreq3[!is.element(WT.Tfreq3$Ab.Name, "Ctr"),]
+# WT.Tfreq3N
+```
+#### Trans.eff. for 2 best performers for all strains
+```{r}
+
+UVM.2best <- UVM.TfreqI.Stat3[is.element(UVM.TfreqI.Stat3$Ab.Name, c("2.24","2.36")),]
+UVM.2best$Strain <- c("UVM","UVM")
+Baf.2best <- Baf.TfreqI.Stat3[is.element(Baf.TfreqI.Stat3$Ab.Name, c("2.24","2.36")),]
+Baf.2best$Strain <- c("Baf","Baf")
+WT.2best <- WT.TfreqI.Stat3[is.element(WT.TfreqI.Stat3$Ab.Name, c("2.24","2.36")),]
+WT.2best$Strain <- c("WT","WT")
+
+UVMBafWT.2best <- rbind(UVM.2best,Baf.2best)
+UVMBafWT.2best <- rbind(UVMBafWT.2best, WT.2best)
+# View(UVMBafWT.2best)
+
+UVM.P2best <- UVM.TfreqI[is.element(UVM.TfreqI$Ab.Name, c("2.24","2.36")),]
+UVM.P2best$Strain <- "UVM"
+# View(UVM.P2best)
+Baf.P2best <- Baf.TfreqI[is.element(Baf.TfreqI$Ab.Name, c("2.24","2.36")),]
+Baf.P2best$Strain <- "Baf"
+# View(Baf.P2best)
+WT.P2best <- WT.TfreqI[is.element(WT.TfreqI$Ab.Name, c("2.24","2.36")),]
+WT.P2best$Strain <- "WT"
+# View(WT.P2best)
+
+UVMBafWT.P2best <- rbind(UVM.P2best,Baf.P2best)
+UVMBafWT.P2best <- rbind(UVMBafWT.P2best, WT.P2best)
+# View(UVMBafWT.P2best)
+
+UVMBafWT.P2best$Ab.Name <- factor(UVMBafWT.P2best$Ab.Name, c("2.24","2.36"))
+UVMBafWT.P2best$Strain <- as.factor(UVMBafWT.P2best$Strain)
+```
+#### Plot Expression efficiency for *UVM*
+```{r}
+## sort Construct levels implicitly
+UVM.Tfreq3N$Ab.Name <- factor(UVM.Tfreq3N$Ab.Name, c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","2.52","2.53","2.36","2.54","2.34","2.40","pOptV"))
+# View(WT.Tfreq3N)
+Baf.Tfreq3N$Ab.Name <- factor(Baf.Tfreq3N$Ab.Name, c("2.24","2.35","2.36"))
+WT.Tfreq3N$Ab.Name <- factor(WT.Tfreq3N$Ab.Name, c("2.24", "2.32","2.35","2.36"))
+# View(UVMBafWT.P2best)
+
+
+mycompar <- list(c("Baf","UVM"),c("UVM","WT"),c("Baf","WT"))
+box.Pbest <- ggplot(UVMBafWT.P2best, aes(x=Strain, y=Trans.eff))
+box2best <- box.Pbest + geom_boxplot(aes(fill =Ab.Name))+
+  ylim(0,120)+
+  labs(x = "Strains", y = "Expression Efficiency [%]", fill = "Constructs")+
+  theme(
+    axis.text.x = element_text(color = "black", size = 14),
+    axis.text.y = element_text(color = "black", size = 14),
+    axis.title.x = element_text(color="black", size=16),
+    axis.title.y = element_text(color="black", size=16),
+    panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.title = element_text(color = "black", size = 14),
+    legend.text = element_text(color = "black", size = 12)
+    )+
+  scale_fill_manual(values= mycolors)+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, aes(x=Strain, group=Ab.Name), position = position_dodge(width = 0.75))+
+  stat_compare_means(comparisons = mycompar,label="p.format", label.y = c(105,110,117)) #Welshe's t-test
+## show the plot
+box2best
+## save the plot
+svg(filename=".\\Plots\\box2best.svg", 
+    width=6, 
+    height=4)
+box2best
+invisible(dev.off()) # alternatively use `graphics.off()`
+
+## Remove levels with N<3
+UVM.TfreqI2 <- UVM.TfreqI[!is.element(UVM.TfreqI$Ab.Name, c("2.33","2.35","2.39","2.40", "2.49","2.48","Ctr") ),]
+UVM.TfreqI2$Ab.Name <- factor(UVM.TfreqI2$Ab.Name, c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","2.52","2.53","2.36","2.54","2.34","pOptV"))
+# View(UVM.TfreqI2)
+# write.csv(UVM.TfreqI2, "UVMTfreqI2_raw.csv")
+
+UVM.TfreqI2S <- aggregate(Trans.eff ~  Ab.Name, UVM.TfreqI2, FUN = function(x) c(means = mean(x), median = median(x), SD = sd(x), MAD = mad(x)))
+# write.csv(UVM.TfreqI2S, "UVMtranseff_summ2.csv")
+
+attach(UVM.TfreqI2)
+ConTest.UVMTfreq <- conover.test(Trans.eff, g=Ab.Name, method="none", altp = FALSE, wrap = TRUE)
+detach(UVM.TfreqI2)
+ConTest.UVMTfreq <- as.data.frame(ConTest.UVMTfreq)
+ConTest.UVMTfreq
+# write.csv(ConTest.UVMTfreq, "ConoverTransEff_UVM.csv")
+
+box.UVMTfreqI2 <- ggplot(UVM.TfreqI2, aes(x=Ab.Name, y=Trans.eff))
+geom.UVMTfreqI2 <- box.UVMTfreqI2 + geom_boxplot(aes(fill = Ab.Name))+
+  ylim(0,105)+
+  labs(x = "Constructs", y = "Expression Efficiency [%]", fill = "Constructs")+
+  theme(
+    axis.text.x = element_text(color = "black", size = 14, angle = 45, vjust = 0.5),
+    axis.text.y = element_text(color = "black", size = 14),
+    axis.title.x = element_text(color="black", size=16),
+    axis.title.y = element_text(color="black", size=16),
+    panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.position = "none"
+    )+
+  scale_fill_manual(values = mycolors)+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  stat_compare_means(label="p.signif",label.y = 105, size=6, method = "t.test",ref.group = "pOptV", hide.ns = TRUE)
+
+## show the plot
+geom.UVMTfreqI2
+
+## save the plot as SVG file 
+## works faster than ggsave
+svg(filename=".\\Plots\\UVM_ExprEff_NewOrder.svg", 
+    width=6, 
+    height=4)
+geom.UVMTfreqI2
+invisible(dev.off()) # alternatively use `graphics.off()`
+
+
+UVM.TfreqI3 <- UVM.TfreqI[!is.element(UVM.TfreqI$Ab.Name, c("2.39","2.49","2.48","Ctr") ),]
+UVM.TfreqI3$Ab.Name <- factor(UVM.TfreqI3$Ab.Name, c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","2.52","2.53","2.35","2.36","2.54","2.33","2.34","2.40","pOptV"))
+
+box.UVMTfreqI3 <- ggplot(UVM.TfreqI3, aes(x=Ab.Name, y=Trans.eff))
+geom.UVMTfreqI3 <- box.UVMTfreqI3 + geom_boxplot(aes(fill = Ab.Name))+
+  ylim(0,105)+
+  labs(x = "Constructs", y = "Expression Efficiency [%]", fill = "Constructs")+
+  theme(
+    axis.text.x = element_text(color = "black", size = 14, angle = 45, vjust = 0.5),
+    axis.text.y = element_text(color = "black", size = 14),
+    axis.title.x = element_text(color="black", size=16),
+    axis.title.y = element_text(color="black", size=16),
+    panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.position = "none"
+    )+
+  scale_fill_manual(values = mycolors)+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  stat_compare_means(label="p.signif",label.y = 105, size=6, method = "t.test",ref.group = "pOptV", hide.ns = TRUE)
+
+#show the plot
+geom.UVMTfreqI3
+
+# save the plot as SVG file 
+## works faster than ggsave
+svg(filename=".\\Plots\\UVM_ExprEff_NewOrder3.svg", 
+    width=6, 
+    height=4)
+geom.UVMTfreqI3
+invisible(dev.off()) # alternatively use `graphics.off()`
+```
+
+#### Plot Expression efficiencies for *Baf* and *WT*
+```{r}
+# View(Baf.TfreqI)
+Baf.TfreqI2 <- Baf.TfreqI[!is.element(Baf.TfreqI$Ab.Name, c("2.33","2.35","2.39", "2.49","2.48","Ctr") ),]
+
+box.BafTfreqI <- ggplot(Baf.TfreqI2, aes(x=Ab.Name, y=Trans.eff))
+
+box.BafExpEff <- box.BafTfreqI + geom_boxplot(aes(fill = Ab.Name))+
+  ylim(0,105)+
+  labs(title="Expression efficiency - Baf", x = "Constructs", y = "Expression Efficiency [%]", fill = "Constructs")+
+  theme(
+    plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+    axis.text.x = element_text(color = "black", size = 14, angle = 45, vjust = 0.5),
+    axis.text.y = element_text(color = "black", size = 14),
+    axis.title.x = element_text(color="black", size=16),
+    axis.title.y = element_text(color="black", size=16),
+    panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.position = "none"
+    )+
+  scale_fill_manual(values = mycolors)+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  stat_compare_means(label="p.signif",label.y = 105, size=6, method = "t.test",ref.group = "pOptV", hide.ns = TRUE)
+box.BafExpEff
+svg(filename=".\\Plots\\Baf_ExprEff_NewOrder.svg", 
+    width=6, 
+    height=4)
+box.BafExpEff
+invisible(dev.off())
+
+
+
+
+WT.TfreqI2 <- WT.TfreqI[!is.element(WT.TfreqI$Ab.Name, c("2.33","2.35","2.39", "2.49","2.48","Ctr") ),]
+# View(WT.TfreqI2)
+box.WTTfreqI <- ggplot(WT.TfreqI2, aes(x=Ab.Name, y=Trans.eff))
+
+box.WTExpEff <- box.WTTfreqI + geom_boxplot(aes(fill = Ab.Name))+
+  ylim(0,105)+
+  labs(title="Expression efficiency - WT",x = "Constructs", y = "Expression Efficiency [%]", fill = "Constructs")+
+  theme(
+    plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+    axis.text.x = element_text(color = "black", size = 14, angle = 45, vjust = 0.5),
+    axis.text.y = element_text(color = "black", size = 14),
+    axis.title.x = element_text(color="black", size=16),
+    axis.title.y = element_text(color="black", size=16),
+    panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.position = "none"
+    )+
+  scale_fill_manual(values = mycolors)+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  stat_compare_means(label="p.signif",label.y = 105, size=6, method = "t.test",ref.group = "pOptV", hide.ns = TRUE)
+box.WTExpEff
+svg(filename=".\\Plots\\WT_ExprEff_NewOrder.svg", 
+    width=6, 
+    height=4)
+box.WTExpEff
+invisible(dev.off())
+
+```
+#### Plot Expression efficiencies for samples N>=3 for *Baf* and *WT* 
+```{r}
+
+box.all3.Baf <- ggplot(Baf.Tfreq3N, aes(x=Ab.Name, y=Trans.eff))
+
+box.all3.Baf + geom_boxplot(aes(fill = Ab.Name))+
+  ylim(0,105)+
+  labs(title = "Expression Efficiency Baf", x = "Constructs", y = "Expression Efficiency [%]", fill = "Constructs")+
+  theme(
+    plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+    axis.title.x = element_text(color="black", size=12),
+    axis.title.y = element_text(color="black", size=12),
+    panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_rect(color = "black", fill = NA)
+    )+
+  scale_fill_manual(values = mycolors)+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  stat_compare_means(label="p.signif",label.y = 105, method = "t.test", hide.ns = TRUE)
+
+
+box.all3.WT <- ggplot(WT.Tfreq3N, aes(x=Ab.Name, y=Trans.eff))
+
+box.all3.WT + geom_boxplot(aes(fill = Ab.Name))+
+  ylim(0,105)+
+  labs(title = "Expression Efficiency WT", x = "Constructs", y = "Expression Efficiency [%]", fill = "Constructs")+
+  theme(
+    plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+    axis.title.x = element_text(color="black", size=12),
+    axis.title.y = element_text(color="black", size=12),
+    panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_rect(color = "black", fill = NA)
+    )+
+  scale_fill_manual(values = mycolors)+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  stat_compare_means(label="p.signif",label.y = 105, method = "t.test", hide.ns = TRUE)
+
+```
+
+## **Plotting and other representations**
+Use point plots for showing percent data and threshold applied
+Use boxplots for subets comparisons
+#### Boxplots for percent of positive population with marked threshold lines
+```{r basic plotting}
+UVM.Tfreq3N$Ab.Name <- factor(UVM.Tfreq3N$Ab.Name, c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","2.35","2.36","2.52","2.53","2.54","pOptV"))
+
+UVMFD.short <- UVM.FD[is.element(UVM.FD$Ab.Name,c("2.2","2.18","2.19","2.22","2.23","2.24","2.32", "2.33", "2.34","2.35","2.36", "2.40","2.52","2.53","2.54","pOptV", "Ctr")),]
+# str(UVMFD.short)
+box.UVM.FD <- ggplot(UVMFD.short, aes(x=Ab.Name, y=PercentPositives))
+
+box.UVM.FD + geom_boxplot(aes(fill= Ab.Name))+
+  labs(title = "UVM all\n% of positive population", x = "Constructs", y = "% of positive population")+
+  theme(
+        axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+        legend.title = element_blank()
+    )+
+  ylim(0,100)+
+  scale_fill_manual(values = mycolors)+
+  geom_dotplot(stackdir = "center", binaxis = "y", binwidth = 0.4)+
+  geom_hline(yintercept=UVM.Per.threshold)+
+  guides(fill=guide_legend(ncol=2))
+
+
+  
+
+box.Baf.FD <- ggplot(Baf.FD, aes(x=Ab.Name, y=PercentPositives))
+
+box.Baf.FD + geom_boxplot(aes(fill= Ab.Name))+
+  labs(title = "Baf all\n% of positive population", x = "Constructs", y = "% of positive population")+
+  theme(
+        axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+        legend.title = element_blank()
+    )+
+  ylim(0,100)+
+  scale_fill_manual(values = mycolors)+
+  geom_dotplot(stackdir = "center", binaxis = "y", binwidth = 0.4)+
+  geom_hline(yintercept=Baf.Per.threshold)+
+  guides(fill=guide_legend(ncol=2))
+
+WTFD.short <- WT.FD[is.element(WT.FD$Ab.Name,c("2.18","2.19","2.22","2.24", "2.30", "2.31","2.32", "2.33", "2.34","2.35","2.36","pOptV", "Ctr")),]
+
+box.WT.FD <- ggplot(WTFD.short, aes(x=Ab.Name, y=PercentPositives))
+
+box.WT.FD + geom_boxplot(aes(fill= Ab.Name))+
+  labs(title = "WT all\n% of positive population", x = "Constructs", y = "% of positive population")+
+  theme(
+        axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+        legend.title = element_blank()
+    )+
+  ylim(0,100)+
+  scale_fill_manual(values = mycolors)+
+  geom_dotplot(stackdir = "center", binaxis = "y", binwidth = 0.4)+
+  geom_hline(yintercept=WT.Per.threshold)+
+  guides(fill=guide_legend(ncol=2))
+```
+#### Point plots representing distribution of samples along positive/negative threshold (y) and fluorescent signal (x)
+```{r point plots}
+UVM.pntFoc <- UVM.FD[!is.element(UVM.FD$Ab.Name, c("2.39","2.48","2.49")),]
+
+pnt.Baf.FD <- ggplot(Baf.FD, aes(x=Median, y=PercentPositives, color = Ab.Name))
+
+pnt.Baf.FD + geom_point(size=3)+
+  labs(title = "Baf all", x = expression("Median Fluorescence (log"[10]*")"), y = "% of positive population")+
+  theme(
+        axis.text.x = element_text(angle = 0, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3)
+    )+
+  ylim(0,100)+
+  scale_x_log10(breaks=c(100,500,1000,2000,5000,10000,20000,40000), limits = c(500,40000))+
+  scale_color_manual(values = mycolors, name = "Constructs")+
+  geom_vline(xintercept = 1.5*UVM.median.V)+
+  geom_vline(xintercept = 5*UVM.median.V)+
+  geom_hline(yintercept=Baf.Per.threshold)+
+  guides(color=guide_legend(ncol=2))
+
+pnt.WT.FD <- ggplot(WT.FD, aes(x=Median, y=PercentPositives, color = Ab.Name))
+
+pnt.WT.FD + geom_point(size=3)+
+  labs(title = "WT all", x = expression("Median Fluorescence (log"[10]*")"), y = "% of positive population")+
+  theme(
+        axis.text.x = element_text(angle = 0, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3)
+    )+
+  ylim(0,100)+
+  scale_x_log10(breaks=c(100,500,1000,2000,5000,10000,20000,40000), limits = c(500,40000))+
+  scale_color_manual(values = mycolors, name = "Constructs")+
+  geom_vline(xintercept = 1.5*UVM.median.V)+
+  geom_vline(xintercept = 5*UVM.median.V)+
+  geom_hline(yintercept=WT.Per.threshold)+
+  guides(color=guide_legend(ncol=2))
+
+mycolors2 <- c("2.2" = "#ff80ff","2.18" = "#ff00ff","2.19" = "#993399","2.22" = "#ff7733","2.23" = "#ff3300","2.24" = "#ff0000","2.30" = "#30e59d","2.31" = "#0dffde","2.32" = "#b30000","pOptV" = "#663300","2.33" = "#99e6e6","2.34" = "#248f8f","2.35" = "#0099ff","2.36" = "#0040ff","2.52" = "#00e600","2.53" = "#009900","2.54" = "#336600","2.40" = "#ccff33", "Ctrl" = "grey50", "2.39" = "#ffffcc", "2.48" = "#ffcccc", "2.49" = "#ccccff")
+
+UVMFD2 <- UVM.FD[is.element(UVM.FD$Ab.Name,c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","2.52","2.53","2.36","2.54","2.34","2.40","pOptV", "Ctr")),]
+UVMFD2$Ab.Name <- recode_factor(UVMFD2$Ab.Name, 'Ctr' = "Ctrl")
+# UVMFD2 %>% count(Ab.Name) %>% filter(Ab.Name == "Ctr")
+UVMFD2$Ab.Name <- factor(UVMFD2$Ab.Name,c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","2.52","2.53","2.36","2.54","2.34","2.40","pOptV", "Ctrl"))
+# str(UVMFD2)
+# View(UVMFD2)
+pnt.UVM.FD2 <- ggplot(UVMFD2, aes(x=Median, y=PercentPositives, color = Ab.Name))
+
+pntUVMFD2 <- pnt.UVM.FD2 + geom_point(size=3)+
+  labs(x = expression("Median Fluorescence (log"[10]*")"), y = "% of positive population")+
+  theme(
+        axis.text.x = element_text(color="black",size = 14,angle = 45, vjust = 0.5),
+        axis.text.y = element_text(color="black",size = 14),
+        axis.title.x = element_text(color="black", size=16),
+        axis.title.y = element_text(color="black", size=16),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+        legend.title = element_text(color = "black", size = 14),
+        legend.text = element_text(color = "black", size = 12)
+    )+
+  ylim(0,100)+
+  scale_x_log10(breaks=c(100,500,1000,2000,5000,10000,20000,40000), limits = c(500,40000))+
+  scale_color_manual(values = mycolors2, name = "Constructs")+
+  geom_vline(xintercept = 1.5*UVM.median.V)+
+  geom_vline(xintercept = 5*UVM.median.V)+
+  geom_hline(yintercept=UVM.Per.threshold)+
+  guides(color=guide_legend(ncol=2))
+pntUVMFD2
+svg(filename=".\\Plots\\UVM_PointPlot2.svg", 
+    width=6, 
+    height=4)
+pntUVMFD2
+invisible(dev.off()) # alternatively use `graphics.off()`
+
+```
+#### Boxplots of fluorescence and High/Medium/Low-class division marks on separate plots for 2A- and IRES-based constructs
+```{r H/M/L thresholds}
+attach(UVM.pos2A)
+ConTest.UVM.pos2A <- conover.test(Median, g=Ab.Name, method="none", altp = FALSE, wrap = TRUE)
+detach(UVM.pos2A)
+ConTest.UVM.pos2A <- as.data.frame(ConTest.UVM.pos2A)
+
+UVM.2Aex <- UVM.pos2A %>%
+  group_by(Ab.Name) %>%
+  count()
+UVM.2Aex=as.data.frame(UVM.2Aex)
+colnames(UVM.2Aex) <- c("Constructs","Total Positives")
+# View(UVM.2Aex)
+
+box.UVM.pos2A <- ggplot(UVM.pos2A, aes(x=Ab.Name, y=Median))
+labels.UVM.pos2A <- data.frame(Ab.Name = c("2.2","2.18","2.19","2.22","2.23","2.24","2.32","pOptV"), Median = c(40000))
+box.UVM.pos2A + geom_boxplot(aes(fill =Ab.Name))+
+  labs(title = "UVM 2A", x = "Constructs", y = expression("Median Fluorescence (log  "[10]*")"), fill = "Constructs")+
+  theme(
+        axis.text.x = element_text(angle = 0, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+        legend.position = "none"
+    )+
+  scale_y_log10(breaks=c(100,500,1000,2000,5000,10000,20000,40000), limits = c(500,40000))+
+  geom_hline(yintercept = 1.5*UVM.median.V)+
+  geom_hline(yintercept = 5*UVM.median.V)+
+  scale_fill_manual(values = mycolors, name = "Constructs")+
+  guides(color=guide_legend(ncol=2))+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  geom_text(data = labels.UVM.pos2A, label = c("****","*","ns","**","***","ns","****",""), size = 4, vjust = 0.2)
+
+# Signif. codes: '****' 0; '***' 0.001; '**' 0.01; '*' 0.05; 'ns' >0.05; 
+  
+box.UVM.posIRES <- ggplot(UVM.posIRES, aes(x=Ab.Name, y=Median))
+labels.UVM.posIRES <- data.frame(Ab.Name = c("2.33","2.34","2.35","2.36","2.52","2.53","2.54","pOptV"), Median = c(40000))
+
+box.UVM.posIRES + geom_boxplot(aes(fill =Ab.Name))+
+   labs(title = "UVM IRES", x = "Constructs", y = expression("Median Fluorescence (log  "[10]*")"), fill = "Constructs")+
+  theme(
+        axis.text.x = element_text(angle = 0, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+        legend.position = "none"
+    )+
+  scale_y_log10(breaks=c(100,500,1000,2000,5000,10000,20000,40000), limits = c(500,40000))+
+  geom_hline(yintercept = 1.5*UVM.median.V)+
+  geom_hline(yintercept = 5*UVM.median.V)+
+  scale_fill_manual(values = mycolors, name = "Constructs")+
+  guides(fill=guide_legend(nrow=1))+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  geom_text(data = labels.UVM.posIRES, label = c("ns","**","ns","**","****","****","****",""), size = 4, vjust = 0.2)
+
+# Signif. codes: '****' 0; '***' 0.001; '**' 0.01; '*' 0.05; 'ns' >0.05;
+
+attach(UVM.posIRES)
+ConTest.UVM.posIRES <- conover.test(Median, g=Ab.Name, method="none", altp = FALSE, wrap = TRUE)
+detach(UVM.posIRES)
+ConTest.UVM.posIRES <- as.data.frame(ConTest.UVM.posIRES)
+write.csv(ConTest.UVM.posIRES,"ConoverT_UVMposIRES.csv")
+
+geom_signif(stat = "identity", 
+              data=data.frame(x=c(1,2,3,4,5,6,7,8),y=c(39900), annotation=c("ns","ns","*","**","*","*","**","")),
+              aes(x=x,xend=x,y=y,yend=y, annotation=annotation))
+label = c("ns","ns","p=0.012","p=0.004","p=0.015","p=0.013","p=0.008","")
+labels.UVM.posIRES <- data.frame(Ab.Name = c("2.33","2.34","2.35","2.36","2.52","2.53","2.54","pOptV"), Median = c(40000))
+# labels.UVM.posIRES
+
+```
+#### Boxplots of Median fluorescence for 2A- and IRES-based with marked H/M/L threshold lines 
+```{r}
+attach(UVM.posR)
+ConTest.UVM.posR <- conover.test(Median, g=Ab.Name, method="bonferroni", altp = FALSE, wrap = TRUE)
+detach(UVM.posR)
+ConTest.UVM.posR <- as.data.frame(ConTest.UVM.posR)
+# View(ConTest.UVM.posR)
+write.csv(ConTest.UVM.posIRES,"ConoverT_UVMposIRES.csv")
+
+box.UVM.posR <- ggplot(UVM.posR, aes(x=Ab.Name, y=Median))
+labels.UVM.posR <- data.frame(Ab.Name = c("2.2", "2.18", "2.19", "2.22", "2.23", "2.24","2.32","2.52","2.53","2.36","2.54","2.34","pOptV"), Median = c(40000))
+boxUVMposR <- box.UVM.posR + geom_boxplot(aes(fill =Ab.Name))+
+  labs(x = "Constructs", y = expression("Median Fluorescence (log  "[10]*")"), fill = "Constructs")+
+  theme(
+        axis.text.x = element_text(color = "black", size = 14, angle = 45, vjust = 0.5),
+        axis.text.y = element_text(color = "black", size = 14),
+        axis.title.x = element_text(color="black", size=16),
+        axis.title.y = element_text(color="black", size=16),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3),
+        legend.position = "none"
+    )+
+  scale_y_log10(breaks=c(100,500,1000,2000,5000,10000,20000,40000), limits = c(500,40000))+
+  geom_hline(yintercept = 1.5*UVM.median.V)+
+  geom_hline(yintercept = 5*UVM.median.V)+
+  scale_fill_manual(values = mycolors, name = "Constructs")+
+  guides(color=guide_legend(ncol=2))+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  geom_text(data = labels.UVM.posR, label = c("****","ns","ns","ns","***","ns","****","****","****","****","****","*",""), size = 4, vjust = 0.2)
+boxUVMposR
+# Signif. codes: '****' 0; '***' < 0.001; '**' < 0.01; '*' < 0.05; 'ns' > 0.05; 
+svg(filename=".\\Plots\\ExpressionLvls_comb2.svg", 
+    width=6, 
+    height=4)
+boxUVMposR
+invisible(dev.off()) # alternatively use `graphics.off()`
+ 
+
+```
+
+#### Correspondence analysis of transformation to construct-related fluorescence
+```{r}
+
+UVMposF.tab <- xtabs(Median~Ab.Name+Plate, UVM.posF)
+
+posF.ca <- ca(UVMposF.tab)
+plot(posF.ca)
+summary(posF.ca)
+
+```
+
+#### Defining and applying thresholds for High/Medium/Low-class of fluorescence signal. Ploting the results as bar graphs for *UVM*
+```{r}
+UVM.pos.High2 <- subset(UVM.posR, Median > 5*UVM.median.V)
+UVM.pos.Medium2 <- subset(UVM.posR, Median > 2*UVM.median.V & Median < 5*UVM.median.V) 
+UVM.pos.Low2 <- subset(UVM.posR, Median < 2*UVM.median.V) 
+
+UVM.exH2 <- UVM.pos.High2 %>%
+  group_by(Ab.Name) %>%
+  count()
+UVM.exH2=as.data.frame(UVM.exH2)
+colnames(UVM.exH2) <- c("Constructs","High.Exp")
+# View(UVM.exH)
+
+UVM.exM2 <- UVM.pos.Medium2 %>%
+  group_by(Ab.Name) %>%
+  count()
+UVM.exM2=as.data.frame(UVM.exM2)
+colnames(UVM.exM2) <- c("Constructs","Medium.Exp")
+# View(UVM.exM)
+
+UVM.exL2 <- UVM.pos.Low2 %>%
+  group_by(Ab.Name) %>%
+  count()
+UVM.exL2=as.data.frame(UVM.exL2)
+colnames(UVM.exL2) <- c("Constructs","Low.Exp")
+
+UVM.express.num2 <- merge(UVM.exH2, UVM.exM2, by = c("Constructs"),all=TRUE)
+UVM.express.num2 <- merge(UVM.express.num2, UVM.exL2, by = c("Constructs"),all=TRUE)
+UVM.expnum.long2 <- UVM.express.num2 %>% gather(Expression, Population, c(High.Exp,Medium.Exp,Low.Exp))
+UVM.expnum.long2[is.na(UVM.expnum.long2)] <- 0
+UVM.expnum.long2$Expression <- factor(UVM.expnum.long2$Expression, c("Low.Exp","Medium.Exp","High.Exp"))
+
+UVM.expnum.PL2 <- UVM.expnum.long2 %>%
+  group_by(Constructs, Expression) %>%
+  dplyr::summarise(n=Population) %>%
+  mutate(percent = ((n / sum(n))*100), cumsum=cumsum(percent), label=ifelse(Expression=="High.Exp", paste0("N=",sum(n)),""))
+UVM.expnum.PL2$Expression <- factor(UVM.expnum.PL2$Expression, c("High.Exp","Medium.Exp","Low.Exp"))
+UVM.expnum.PL2$percent[UVM.expnum.PL2$percent == 0] <- NA
+UVM.expnum.PL2 <- as.data.frame(UVM.expnum.PL2)
+UVM.expnum.PL2$Per <- UVM.expnum.PL2$percent*100
+# View(UVM.expnum.PL2)
+
+
+bar.UVM.cat <- ggplot(UVM.expnum.PL2, aes(x=Constructs, y=percent, fill = Expression))
+BarCat <- bar.UVM.cat + geom_bar(stat = "identity", color = "gray20")+
+  labs(y = "% of positive colonies", x = "Constructs")+
+  theme(
+        axis.text.x = element_text(color="black", size=14,angle = 45, vjust = 0.5),
+        axis.text.y = element_text(color="black", size=14,angle = 0, vjust = 0.5),
+        axis.title.x = element_text(color="black", size=16),
+        axis.title.y = element_text(color="black", size=16),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.background = element_rect(fill = "white"),
+        #panel.grid.major = element_line(color = "grey",size = 0.6, linetype = 3),
+        legend.title = element_text(color = "black", size = 14),
+        legend.text = element_text(color = "black", size = 12)
+    )+
+  scale_fill_manual(labels = c("High","Medium","Low"),values = c("firebrick1","forestgreen","dodgerblue1"), name = "Expression")+
+  geom_text(aes(label=label, y=cumsum), hjust = -0.1, size=4, angle = 90)+
+  geom_text(aes(label = sprintf("%0.1f", round(percent, digits = 1))),size = 3, position = position_stack(vjust = 0.5))+
+  expand_limits(y=120)
+BarCat
+svg(filename=".\\Plots\\UVM_ExpLvlCategories2.svg", 
+    width=6, 
+    height=4)
+BarCat
+invisible(dev.off()) # alternatively use `graphics.off()`
+```
+
+#### Defining and applying thresholds for High/Medium/Low-class of fluorescence signal. Ploting the results as bar graphs for *Baf*
+```{r}
+Baf.pos.High <- subset(Baf.posF, Median > 5*UVM.median.V)
+Baf.pos.Medium <- subset(Baf.posF, Median > 2*UVM.median.V & Median < 5*UVM.median.V) 
+Baf.pos.Low <- subset(Baf.posF, Median < 2*UVM.median.V) 
+
+Baf.express <- Baf.posF %>%
+  group_by(Ab.Name) %>%
+  count()
+Baf.express=as.data.frame(Baf.express)
+colnames(Baf.express) <- c("Constructs","Total.Positives")
+
+Baf.exH <- Baf.pos.High %>%
+  group_by(Ab.Name) %>%
+  count()
+Baf.exH=as.data.frame(Baf.exH)
+colnames(Baf.exH) <- c("Constructs","High.Exp")
+
+Baf.exM <- Baf.pos.Medium %>%
+  group_by(Ab.Name) %>%
+  count()
+Baf.exM=as.data.frame(Baf.exM)
+colnames(Baf.exM) <- c("Constructs","Medium.Exp")
+
+Baf.exL <- Baf.pos.Low %>%
+  group_by(Ab.Name) %>%
+  count()
+Baf.exL=as.data.frame(Baf.exL)
+colnames(Baf.exL) <- c("Constructs","Low.Exp")
+
+Baf.express.ALL <- merge(Baf.express, Baf.exH, by = c("Constructs"),all=TRUE)
+Baf.express.ALL$High.Per <- with(Baf.express.ALL, High.Exp / Total.Positives * 100) 
+# View(Baf.express.ALL)
+
+Baf.express.ALL <- merge(Baf.express.ALL, Baf.exM, by = c("Constructs"),all=TRUE)
+Baf.express.ALL$Medium.Per <- with(Baf.express.ALL, Medium.Exp / Total.Positives * 100)
+
+Baf.express.ALL <- merge(Baf.express.ALL, Baf.exL, by = c("Constructs"),all=TRUE)
+Baf.express.ALL$Low.Per <- with(Baf.express.ALL, Low.Exp / Total.Positives * 100)
+Baf.expALL.long <- Baf.express.ALL %>% gather(Expression.Per, Percentage, c(Low.Per,Medium.Per,High.Per))
+Baf.expALL.long$Expression.Per <- factor(Baf.expALL.long$Expression.Per, c("High.Per","Medium.Per","Low.Per"))
+# View(Baf.pos.High)
+
+
+
+box.Baf.pos.High <- ggplot(Baf.pos.High, aes(x=Ab.Name, y=Median))
+box.Baf.pos.High + geom_boxplot(aes(fill =Ab.Name))+
+   labs(title = "Baf High", x = "Constructs", y = expression("Median Fluorescence (log  "[10]*")"), fill = "Constructs")+
+  theme(
+        axis.text.x = element_text(angle = 0, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3)
+    )+
+  scale_y_log10(breaks=c(5000,10000,20000,40000), limits = c(4500,40000))+
+  scale_fill_manual(values = mycolors, name = "Constructs")+
+  guides(color=guide_legend(ncol=2))+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  stat_compare_means(label="p.signif",ref.group = "pOptV", hide.ns = TRUE) #Welshe's t-test
+
+Baf.express.num <- merge(Baf.exH, Baf.exM, by = c("Constructs"),all=TRUE)
+Baf.express.num <- merge(Baf.express.num, Baf.exL, by = c("Constructs"),all=TRUE)
+Baf.expnum.long <- Baf.express.num %>% gather(Expression, Population, c(High.Exp,Medium.Exp,Low.Exp))
+Baf.expnum.long$Expression <- factor(Baf.expnum.long$Expression, c("Low.Exp","Medium.Exp","High.Exp"))
+# View(Baf.expALL.long)
+
+Baf.expressLabel <- Baf.express
+Baf.expressLabel$Percentage <- with(Baf.expressLabel, c(99))
+Baf.expressLabel$Expression.Per <- with(Baf.expressLabel, c(100))
+
+Baf.express.num <- merge(Baf.exH, Baf.exM, by = c("Constructs"),all=TRUE)
+Baf.express.num <- merge(Baf.express.num, Baf.exL, by = c("Constructs"),all=TRUE)
+Baf.expnum.long <- Baf.express.num %>% gather(Expression, Population, c(High.Exp,Medium.Exp,Low.Exp))
+Baf.expnum.long[is.na(Baf.expnum.long)] <- 0
+Baf.expnum.long$Expression <- factor(Baf.expnum.long$Expression, c("Low.Exp","Medium.Exp","High.Exp"))
+Baf.expnum.PL <- Baf.expnum.long %>%
+  group_by(Constructs, Expression) %>%
+  dplyr::summarise(n=Population) %>%
+  mutate(percent = (n / sum(n)*100), cumsum=cumsum(percent), label=ifelse(Expression=="High.Exp", paste0("N=",sum(n)),""))
+Baf.expnum.PL$Expression <- factor(Baf.expnum.PL$Expression, c("High.Exp","Medium.Exp","Low.Exp"))
+Baf.expnum.PL$percent[Baf.expnum.PL$percent == 0] <- NA
+Baf.expnum.PL <- as.data.frame(Baf.expnum.PL)
+# Baf.expnum.PL
+
+
+
+bar.Baf.PL <- ggplot(Baf.expnum.PL, aes(x=Constructs, y=percent, fill = Expression))
+
+BarBafCat <- bar.Baf.PL + geom_bar(stat = "identity", color = "gray20")+
+  labs(y = "% of positive colonies", x = "Constructs")+
+  theme(
+        axis.text.x = element_text(color="black", size=14,angle = 45, vjust = 0.5),
+        axis.text.y = element_text(color="black", size=14,angle = 0, vjust = 0.5),
+        axis.title.x = element_text(color="black", size=16),
+        axis.title.y = element_text(color="black", size=16),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.background = element_rect(fill = "white"),
+        #panel.grid.major = element_line(color = "grey",size = 0.6, linetype = 3),
+        legend.title = element_text(color = "black", size = 14),
+        legend.text = element_text(color = "black", size = 12)
+    )+
+  scale_fill_manual(labels = c("High","Medium","Low"),values = c("firebrick1","forestgreen","dodgerblue1"), name = "Expression")+
+  geom_text(aes(label=label, y=cumsum), hjust = -0.1, size=4, angle = 90)+
+  geom_text(aes(label = sprintf("%0.1f", round(percent, digits = 1))),size = 3, position = position_stack(vjust = 0.5))+
+  expand_limits(y=120)
+BarBafCat
+svg(filename=".\\Plots\\Baf_ExpLvlCategories2.svg", 
+    width=6, 
+    height=4)
+BarBafCat
+invisible(dev.off()) # alternatively use `graphics.off()`
+```
+#### Defining and applying thresholds for High/Medium/Low-class of fluorescence signal. Ploting the results as bar graphs for *WT*
+```{r}
+WT.pos.High <- subset(WT.posF, Median > 5*UVM.median.V)
+WT.pos.Medium <- subset(WT.posF, Median > 2*UVM.median.V & Median < 5*UVM.median.V) 
+WT.pos.Low <- subset(WT.posF, Median < 2*UVM.median.V) 
+
+WT.express <- WT.posF %>%
+  group_by(Ab.Name) %>%
+  count()
+WT.express=as.data.frame(WT.express)
+colnames(WT.express) <- c("Constructs","Total.Positives")
+
+WT.exH <- WT.pos.High %>%
+  group_by(Ab.Name) %>%
+  count()
+WT.exH=as.data.frame(WT.exH)
+colnames(WT.exH) <- c("Constructs","High.Exp")
+
+WT.exM <- WT.pos.Medium %>%
+  group_by(Ab.Name) %>%
+  count()
+WT.exM=as.data.frame(WT.exM)
+colnames(WT.exM) <- c("Constructs","Medium.Exp")
+
+WT.exL <- WT.pos.Low %>%
+  group_by(Ab.Name) %>%
+  count()
+WT.exL=as.data.frame(WT.exL)
+colnames(WT.exL) <- c("Constructs","Low.Exp")
+
+WT.express.ALL <- merge(WT.express, WT.exH, by = c("Constructs"),all=TRUE)
+WT.express.ALL$High.Per <- with(WT.express.ALL, High.Exp / Total.Positives * 100) 
+# WT.express.ALL
+
+WT.express.ALL <- merge(WT.express.ALL, WT.exM, by = c("Constructs"),all=TRUE)
+WT.express.ALL$Medium.Per <- with(WT.express.ALL, Medium.Exp / Total.Positives * 100)
+
+WT.express.ALL <- merge(WT.express.ALL, WT.exL, by = c("Constructs"),all=TRUE)
+WT.express.ALL$Low.Per <- with(WT.express.ALL, Low.Exp / Total.Positives * 100)
+WT.expALL.long <- WT.express.ALL %>% gather(Expression.Per, Percentage, c(Low.Per,Medium.Per,High.Per))
+WT.expALL.long$Expression.Per <- factor(WT.expALL.long$Expression.Per, c("High.Per","Medium.Per","Low.Per"))
+# View(WT.pos.High)
+
+
+
+box.WT.pos.High <- ggplot(WT.pos.High, aes(x=Ab.Name, y=Median))
+box.WT.pos.High + geom_boxplot(aes(fill =Ab.Name))+
+   labs(title = "WT High", x = "Constructs", y = expression("Median Fluorescence (log  "[10]*")"), fill = "Constructs")+
+  theme(
+        axis.text.x = element_text(angle = 0, vjust = 0.5),
+        plot.title = element_text(color="black", size=14, face="bold", hjust = 0.5),
+        axis.title.x = element_text(color="black", size=12),
+        axis.title.y = element_text(color="black", size=12),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.border = element_rect(size = 1, fill = NA),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey",size = 0.5, linetype = 3)
+    )+
+  scale_y_log10(breaks=c(5000,10000,20000,40000), limits = c(4500,40000))+
+  scale_fill_manual(values = mycolors, name = "Constructs")+
+  guides(color=guide_legend(ncol=2))+
+  stat_summary(fun.y = mean, geom = "point",shape=3,size=2, position = position_dodge(width = 0.75))+
+  stat_compare_means(label="p.signif",ref.group = "pOptV", hide.ns = TRUE) #Welshe's t-test
+
+WT.express.num <- merge(WT.exH, WT.exM, by = c("Constructs"),all=TRUE)
+WT.express.num <- merge(WT.express.num, WT.exL, by = c("Constructs"),all=TRUE)
+WT.expnum.long <- WT.express.num %>% gather(Expression, Population, c(High.Exp,Medium.Exp,Low.Exp))
+WT.expnum.long$Expression <- factor(WT.expnum.long$Expression, c("High.Exp","Medium.Exp","Low.Exp"))
+# WT.expnum.long
+
+
+WT.expnum.long[is.na(WT.expnum.long)] <- 0
+WT.expnum.long$Expression <- factor(WT.expnum.long$Expression, c("Low.Exp","Medium.Exp","High.Exp"))
+# WT.expnum.long
+
+WT.expnum.PL <- WT.expnum.long %>%   #use dplyr and scale for combined analysis of percentage and population of posisives (N at the top:)
+  group_by(Constructs, Expression) %>%
+  dplyr::summarise(n=Population) %>%
+  mutate(percent = (n / sum(n)*100), cumsum=cumsum(percent), label=ifelse(Expression=="High.Exp", paste0("N=",sum(n)),""))
+WT.expnum.PL$Expression <- factor(WT.expnum.PL$Expression, c("High.Exp","Medium.Exp","Low.Exp"))
+WT.expnum.PL$percent[WT.expnum.PL$percent == 0] <- NA
+
+
+
+bar.WT.PL <- ggplot(WT.expnum.PL, aes(x=Constructs, y=percent, fill = Expression))
+
+Bar.WTCat <- bar.WT.PL + geom_bar(stat = "identity", color = "gray20")+
+  labs(y = "% of positive colonies", x = "Constructs")+
+  theme(
+        axis.text.x = element_text(color="black", size=14,angle = 45, vjust = 0.5),
+        axis.text.y = element_text(color="black", size=14,angle = 0, vjust = 0.5),
+        axis.title.x = element_text(color="black", size=16),
+        axis.title.y = element_text(color="black", size=16),
+        line = element_line(colour = "black", size = 0.5, linetype = 1, lineend = "butt"), 
+        rect = element_rect(fill = "white", colour = "black", size = 2.5, linetype = 1),
+        panel.background = element_rect(fill = "white"),
+        #panel.grid.major = element_line(color = "grey",size = 0.6, linetype = 3),
+        legend.title = element_text(color = "black", size = 14),
+        legend.text = element_text(color = "black", size = 12)
+    )+
+  scale_fill_manual(labels = c("High","Medium","Low"),values = c("firebrick1","forestgreen","dodgerblue1"), name = "Expression")+
+  geom_text(aes(label=label, y=cumsum), hjust = -0.1, size=4, angle = 90)+
+  geom_text(aes(label = sprintf("%0.1f", round(percent, digits = 1))),size = 3, position = position_stack(vjust = 0.5))+
+  expand_limits(y=120)
+Bar.WTCat
+svg(filename=".\\Plots\\WT_ExpLvlCategories2.svg", 
+    width=6, 
+    height=4)
+Bar.WTCat
+invisible(dev.off())
+```
+
